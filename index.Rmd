@@ -1,0 +1,362 @@
+---
+title: "Unsupervised Machine Learning Techniques - Spice Girls (Tidy Tuesday Week 51 2021)"
+date: "`r Sys.Date()`"
+author: Nils Indreiten
+output:
+    rmdformats::robobook:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+pkgdown:
+  as_is: true   
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidymodels,tidyverse,magrittr,factoextra,patchwork,proxy,ISLR)
+theme_set(theme_minimal())
+load(file = "album_data.rda")
+
+```
+
+# The Data
+
+The data is from [week 51 in the Tidy Tuesday 2021 series.](https://github.com/rfordatascience/tidytuesday/blob/master/data/2021/2021-12-14/readme.md) 
+Lets take a quick look at the data:
+
+```{r echo=TRUE}
+glimpse(studio_album_tracks)
+```
+
+The data frame contains different information pertaining to the tracks of the Spice Girls albums,
+features such as danceability, tempo, energy etc. In order to perform Principal Component Analysis
+and clustering, lets select only the track names and their features:
+
+```{r echo=TRUE}
+# Select only track names and numeric variables:
+Spice_tracks <- studio_album_tracks %>% select(track_name, danceability:tempo) 
+# Make track name row name:
+Spice_tracks <- Spice_tracks %>% column_to_rownames(var="track_name")
+Spice_tracks
+```
+
+The mean of each variable is quite different, therefore some form
+of scaling will have to be performed:
+
+```{r}
+
+Spice_tracks %>% 
+  map_dfr(mean)
+
+```
+
+# Principal Component Analysis
+
+PCA will be performed in two ways in this section. The first is by
+using the prccomp() function directly, using broom for information
+extraction and the second is by using recipes. The prcomp() 
+function requires that the data being passed to it be a fully 
+numeric data.frame or matrix. Setting scale = TRUE in prcomp()
+will perform the scaling that we want:
+
+```{r}
+
+Spice_PCA <-  Spice_tracks %>% 
+  prcomp(scale=TRUE) 
+
+Spice_PCA
+
+```
+
+The tidy() function can be used to extract a few things, by 
+default it will extract the scores of a PCA object in long format:
+
+```{r}
+
+tidy(Spice_PCA)
+
+```
+
+The loadings of the PCA can be obtained, by specifying matrix = 
+"loadings":
+
+```{r}
+
+tidy(Spice_PCA, matrix = "loadings")
+
+```
+
+With this we know how each variable is contributing to each 
+principal component:
+
+```{r}
+# Visualise the first 6 components:
+tidy(Spice_PCA, matrix = "loadings") %>% 
+  filter(PC <= 6) %>% 
+  ggplot(aes(value, column))+
+  facet_wrap(~ PC)+
+  geom_col()
+
+```
+
+Finally, by specifying matrix = "eigenvalues" we can get the 
+explained standard deviation for each PC including a percent 
+and cumulative:
+
+```{r}
+
+tidy(Spice_PCA, matrix = "eigenvalues")
+
+```
+
+And we can plot the results:
+
+```{r}
+
+tidy(Spice_PCA, matrix = "eigenvalues") %>% 
+  ggplot(aes(PC, cumulative)) +
+  geom_point()+
+  geom_line()
+```
+
+
+
+The augment() function will return the fitted PC transformation
+if we apply it to the prcomp() object directly:
+
+```{r}
+
+augment(Spice_PCA)
+
+```
+
+We can apply the transformation to new data by passing the new
+data to the newdata parameter:
+
+```{r}
+
+augment(Spice_PCA, newdata = Spice_tracks[1:5,])
+
+```
+
+
+## Tidymodels:
+
+We can incorporate PCA into the tidymodels framework. The 
+following recipe normalises the data and an id is set for 
+future tidying:
+
+```{r}
+
+pca_rec <- recipe(~., data = Spice_tracks) %>% 
+  step_normalize(all_numeric()) %>% 
+  step_pca(all_numeric(), id= "pca") %>% 
+  prep()
+
+```
+
+We can call the bake() function to get the fitted PC 
+transformation of the numeric variables:
+
+```{r}
+
+pca_rec %>% 
+  bake(new_data = NULL)
+
+```
+
+It can also be applied to new_data:
+
+```{r}
+
+pca_rec %>% 
+  bake(new_data= Spice_tracks[10:31,])
+
+```
+
+The same information as previously obtained from prcomp() can
+be obtained here as well, by specifying id= "pca" and type = 
+"coef" for the scores:
+
+```{r}
+
+tidy(pca_rec, id="pca", type="coef")
+
+```
+
+As well as the eigenvalues:
+
+```{r}
+
+tidy(pca_rec, id="pca", type="variance")
+
+```
+
+There will be times when we do not want all the principal 
+components of the data, the number of components can be specified
+with num_comp: 
+
+```{r}
+
+# For num_comp:
+recipe(~., data = Spice_tracks) %>% 
+  step_normalize(all_numeric()) %>% 
+  step_pca(all_numeric(), num_comp = 3) %>% 
+  prep()
+
+```
+
+Alternatively we can specify a threshold that
+determines how many components to keep by the amount of variance
+they explain. By setting the threshold = 0.7, step_pca() will 
+generate eneough PCAs to explain 70% of the variance:
+
+```{r}
+
+# For threshold:
+recipe(~., data = Spice_tracks) %>% 
+  step_normalize(all_numeric()) %>% 
+  step_pca(all_numeric(), threshold = .7) %>% 
+  prep()
+
+```
+
+# Clustering
+
+## Kmeans Clustering:
+
+Kmeans clustering can be performed on the data by using the 
+funciton kmeans(). We can begin by trying a number of different
+values for k and then select the best one. Multiple models can
+be fitted with the map() and mutate() functions:
+
+```{r}
+
+set.seed(1234)
+multi_kmeans <- multi_kmeans <- tibble(k = 1:10) %>%
+  mutate(
+    model = purrr::map(k, ~ kmeans(Spice_tracks, centers = .x, nstart = 20)),
+    tot.withinss = purrr::map_dbl(model, ~ glance(.x)$tot.withinss)
+  )
+
+multi_kmeans
+
+```
+
+Given that we now have the total within cluster sum of squares,
+they can be plotted against k so we can use the elbow method
+to find the optimal number of clusters:
+
+```{r}
+
+multi_kmeans %>% 
+  ggplot(aes(k, tot.withinss))+
+  geom_point()+
+  geom_line()+
+  geom_vline(xintercept = 2)
+
+```
+
+The elbow can be seen at k = 2, as marked by the x-intercept. As
+such we can now extract the model where k = 2 from multi_means:
+
+```{r}
+
+final_kmeans <- multi_kmeans %>% 
+  filter(k == 2) %>% 
+  pull(model) %>% 
+  pluck(1)
+
+```
+
+The clusters can be visualised as follows:
+
+```{r}
+
+augment(final_kmeans, data = Spice_tracks) %>%
+  ggplot(aes(instrumentalness, loudness, color = .cluster)) +
+  # The variables being plotted can be modified as per the analysis of interest
+  geom_point()
+
+```
+
+## Hierachical Clustering
+
+The hclust() function provides a convenient way to perform
+hierarchical clustering in R. This function only requires one 
+input, which is a dissimilarity structure, that can be produced
+using the dist() function. This method enables the specification 
+of the agglomeration method. Below are a few ways to cluster
+the data:
+
+```{r}
+
+res_hclust_complete <- Spice_tracks %>%
+  dist() %>%
+  hclust(method = "complete")
+
+res_hclust_average <- Spice_tracks %>%
+  dist() %>%
+  hclust(method = "average")
+
+res_hclust_single <- Spice_tracks %>%
+  dist() %>%
+  hclust(method = "single")
+
+```
+
+Th clustering can be visualised using the fviz_dend() function 
+from the factoextra package. 
+
+```{r}
+
+fviz_dend(res_hclust_complete, main = "complete", k = 2)
+
+```
+
+```{r}
+
+fviz_dend(res_hclust_average, main = "average", k = 2)
+
+```
+
+```{r}
+
+fviz_dend(res_hclust_single, main = "single", k = 2)
+
+```
+
+If the importance of the different predictors in a data set is
+not known, it would be beneficial to scale the data such
+that the influence of each variable is equal:
+
+```{r}
+
+  Spice_tracks %>%
+  scale() %>%
+  dist() %>%
+  hclust(method = "complete") %>%
+  fviz_dend(k = 2)
+
+```
+
+An alternative distance calculation method is based on 
+correlation:
+
+```{r}
+
+set.seed(1234)
+Spice_tracks %>% 
+  dist(method = "correlation") %>% 
+  hclust(method = "complete") %>% 
+  fviz_dend()
+
+```
+
+
+
+
