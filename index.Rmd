@@ -17,7 +17,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-pacman::p_load(tidymodels,tidyverse,magrittr,factoextra,patchwork,proxy,ISLR)
+pacman::p_load(tidymodels,tidyverse,magrittr,factoextra,patchwork,proxy,ISLR,umap)
 theme_set(theme_minimal())
 load(file = "album_data.rda")
 
@@ -39,6 +39,7 @@ and clustering, lets select only the track names and their features:
 ```{r echo=TRUE}
 # Select only track names and numeric variables:
 Spice_tracks <- studio_album_tracks %>% select(track_name, danceability:tempo) 
+Spice_tracks_names <- studio_album_tracks |> select(track_name)
 # Make track name row name:
 Spice_tracks <- Spice_tracks %>% column_to_rownames(var="track_name")
 Spice_tracks
@@ -235,7 +236,13 @@ values for k and then select the best one. Multiple models can
 be fitted with the map() and mutate() functions:
 
 ```{r}
-
+# normalised spice data:
+set.seed(1234)
+recipe(~., data = Spice_tracks) %>% 
+    step_normalize(all_numeric()) |>
+    prep() |> 
+    bake(new_data=NULL)->Spice_tracks
+#k-means
 set.seed(1234)
 multi_kmeans <- multi_kmeans <- tibble(k = 1:10) %>%
   mutate(
@@ -275,12 +282,22 @@ final_kmeans <- multi_kmeans %>%
 
 The clusters can be visualised as follows:
 
-```{r}
-
-augment(final_kmeans, data = Spice_tracks) %>%
-  ggplot(aes(instrumentalness, loudness, color = .cluster)) +
+```{r, warning=FALSE,message=FALSE}
+# visualise against umap components:
+set.seed(1234)
+umap(Spice_tracks) |> 
+  pluck('layout') |> 
+  as_tibble() -> umap_object
+# bind rows to cluster data:  
+  augment(final_kmeans, data = Spice_tracks) %>%
+  cbind(umap_object,Spice_tracks_names) |> 
+  ggplot(aes(V1, V2, color = .cluster,text=paste("song:",track_name,
+                                                 "\nenergy:",energy,
+                                                 "\ndanceability:",danceability))) +
   # The variables being plotted can be modified as per the analysis of interest
-  geom_point()
+  geom_point() ->plot
+  
+  plotly::ggplotly(plot,tooltip = ("text"))
 
 ```
 
